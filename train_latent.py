@@ -1,3 +1,4 @@
+raise NotImplementedError
 from diffusers import AutoencoderKL
 from models.dit import MFDiT
 import torch
