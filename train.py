@@ -13,6 +13,12 @@ from pathlib import Path
 
 import wandb
 
+class Avger(list):
+    def avg(self):
+        return sum(self) / len(self)
+    def __str__(self):
+        return f'{self.avg():.6f}' if len(self) > 0 else 'None'
+
 if __name__ == '__main__':
     WORK_DIR = Path(__file__).resolve().parent / 'exps' / f'exp_{time.strftime("%Y%m%d-%H%M%S")}'
     
@@ -80,18 +86,20 @@ if __name__ == '__main__':
                         num_classes=10,
                         flow_ratio=0.50,
                         time_dist=['lognorm', -0.4, 1.0],
-                        cfg_ratio=0.10,
-                        cfg_scale=2.0,
+                        # cfg_ratio=0.10,
+                        cfg_ratio=None, # no cfg
+                        # cfg_scale=2.0,
                         # experimental
-                        cfg_uncond='u')
+                        # cfg_uncond='u'
+                        )
     if accelerator.is_main_process:
         print('num params: {:,}'.format(sum(p.numel() for p in model.parameters() if p.requires_grad)), flush=True)
     model, optimizer, train_dataloader = accelerator.prepare(model, optimizer, train_dataloader)
 
-    # global_step = 0
-    global_step = -1 # debug
-    losses = 0.0
-    mse_losses = 0.0
+    global_step = 0
+    # global_step = -1 # debug
+    losses = Avger()
+    mse_losses = Avger()
 
     log_step = 500
     sample_step = 500
@@ -103,47 +111,49 @@ if __name__ == '__main__':
         })
 
     with tqdm(range(n_steps), dynamic_ncols=True) as pbar:
-        pbar.set_description("Training")
+        # pbar.set_description("Training")
         model.train()
         for step in pbar:
             data = next(train_dataloader)
             x = data[0].to(accelerator.device)
             c = data[1].to(accelerator.device)
+            
+            ### WE TRAIN UNCOND MODEL ###
 
-            loss, mse_val = meanflow.loss(model, x, c)
+            loss, mse_val = meanflow.loss(model, x, c=c)
 
             accelerator.backward(loss)
             optimizer.step()
             optimizer.zero_grad()
 
             global_step += 1
-            losses += loss.item()
-            mse_losses += mse_val.item()
+            losses.append(loss.item())
+            mse_losses.append(mse_val.item())
 
             if accelerator.is_main_process:
                 if global_step % log_step == 0:
                     current_time = time.asctime(time.localtime(time.time()))
-                    batch_info = f'Global Step: {global_step}'
-                    loss_info = f'Loss: {losses / log_step:.6f}    MSE_Loss: {mse_losses / log_step:.6f}'
+                    loss_info = f'Loss: {losses}    MSE_Loss: {mse_losses}'
 
                     # Extract the learning rate from the optimizer
                     lr = optimizer.param_groups[0]['lr']
                     lr_info = f'Learning Rate: {lr:.6f}'
 
-                    log_message = f'{current_time}\n{batch_info}    {loss_info}    {lr_info}\n'
-                    print(log_message, flush=True)
+                    # log_message = f'{current_time}\n{batch_info}    {loss_info}    {lr_info}\n'
+                    # print(log_message, flush=True)
+                    pbar.set_description(f'{loss_info} | {lr_info}')
 
                     # with open('log.txt', mode='a') as n:
                         # n.write(log_message)
                     wandb.log({
-                        "loss": losses / log_step,
-                        "mse_loss": mse_losses / log_step,
+                        "loss": losses.avg(),
+                        "mse_loss": mse_losses.avg(),
                         "learning_rate": lr,
                         # "step": global_step
                     }, step=global_step)
 
-                    losses = 0.0
-                    mse_losses = 0.0
+                    losses = Avger()
+                    mse_losses = Avger()
 
             if global_step % sample_step == 0:
                 if accelerator.is_main_process:

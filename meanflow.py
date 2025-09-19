@@ -138,22 +138,29 @@ class MeanFlow:
 
         z = (1 - t_) * x + t_ * e
         v = e - x
-
+        
         if c is not None:
-            assert self.cfg_ratio is not None
             uncond = torch.ones_like(c) * self.num_classes
-            cfg_mask = torch.rand_like(c.float()) < self.cfg_ratio
-            c = torch.where(cfg_mask, uncond, c)
-            if self.w is not None:
-                with torch.no_grad():
-                    u_t = model(z, t, t, uncond)
-                v_hat = self.w * v + (1 - self.w) * u_t
-                if self.cfg_uncond == 'v':
-                    # offical JAX repo uses original v for unconditional items
-                    cfg_mask = rearrange(cfg_mask, "b -> b 1 1 1").bool()
-                    v_hat = torch.where(cfg_mask, v, v_hat)
+            # assert self.cfg_ratio is not None
+            if self.cfg_ratio is not None:
+                cfg_mask = torch.rand_like(c.float()) < self.cfg_ratio
+                c = torch.where(cfg_mask, uncond, c)
+                if self.w is not None:
+                    with torch.no_grad():
+                        u_t = model(z, t, t, uncond)
+                    v_hat = self.w * v + (1 - self.w) * u_t
+                    if self.cfg_uncond == 'v':
+                        # offical JAX repo uses original v for unconditional items
+                        cfg_mask = rearrange(cfg_mask, "b -> b 1 1 1").bool()
+                        v_hat = torch.where(cfg_mask, v, v_hat)
+                else:
+                    v_hat = v
             else:
                 v_hat = v
+        else:
+            raise NotImplementedError
+            v_hat = v
+            c = torch.ones(batch_size, device=device, dtype=torch.long) * self.num_classes
 
         # forward pass
         # u = model(z, t, r, y=c)
@@ -206,6 +213,36 @@ class MeanFlow:
             r_ = rearrange(r, "b -> b 1 1 1").detach().clone()
 
             v = model(z, t, r, c)
+            z = z - (t_-r_) * v
+
+        z = self.normer.unnorm(z)
+        return z
+    
+    @torch.no_grad()
+    def sample_uncond(self, model, n_per_class, classes=None,
+                          sample_steps=5, device='cuda'):
+        raise NotImplementedError
+        model.eval()
+
+        z = torch.randn(n_per_class * self.num_classes, self.channels,
+                        self.image_size, self.image_size,
+                        device=device)
+        null_c = torch.ones(z.shape[0], device=device, dtype=torch.long) * self.num_classes
+
+        t_vals = torch.linspace(1.0, 0.0, sample_steps + 1, device=device)
+
+        # print(t_vals)
+
+        for i in range(sample_steps):
+            t = torch.full((z.size(0),), t_vals[i], device=device)
+            r = torch.full((z.size(0),), t_vals[i + 1], device=device)
+
+            # print(f"t: {t[0].item():.4f};  r: {r[0].item():.4f}")
+
+            t_ = rearrange(t, "b -> b 1 1 1").detach().clone()
+            r_ = rearrange(r, "b -> b 1 1 1").detach().clone()
+
+            v = model(z, t, r, y=null_c)
             z = z - (t_-r_) * v
 
         z = self.normer.unnorm(z)
