@@ -117,6 +117,7 @@ class MFDiT(nn.Module):
         mlp_ratio=4.0,
         num_register_tokens=4,
         num_classes=1000,
+        new=False,
     ):
         super().__init__()
         self.in_channels = in_channels
@@ -126,7 +127,11 @@ class MFDiT(nn.Module):
         self.num_classes = num_classes
 
         self.x_embedder = PatchEmbed(input_size, patch_size, in_channels, dim)
-        self.t_embedder = TimestepEmbedder(dim)
+        self.new = new
+        if not new:
+            self.t_embedder = TimestepEmbedder(dim)
+        else:
+            self.h_embedder = TimestepEmbedder(dim)
         self.r_embedder = TimestepEmbedder(dim)
 
         self.use_cond = num_classes is not None
@@ -166,8 +171,15 @@ class MFDiT(nn.Module):
             nn.init.normal_(self.y_embedder.embedding.weight, std=0.02)
 
         # Initialize timestep embedding MLP:
-        nn.init.normal_(self.t_embedder.mlp[0].weight, std=0.02)
-        nn.init.normal_(self.t_embedder.mlp[2].weight, std=0.02)
+        if not self.new:
+            nn.init.normal_(self.t_embedder.mlp[0].weight, std=0.02)
+            nn.init.normal_(self.t_embedder.mlp[2].weight, std=0.02)
+        else:
+            nn.init.normal_(self.h_embedder.mlp[0].weight, std=0.02)
+            nn.init.normal_(self.h_embedder.mlp[2].weight, std=0.0)
+            
+            nn.init.normal_(self.r_embedder.mlp[0].weight, std=0.02)
+            nn.init.normal_(self.r_embedder.mlp[2].weight, std=0.02)
 
         # Zero-out adaLN modulation layers in DiT blocks:
         for block in self.blocks:
@@ -205,11 +217,11 @@ class MFDiT(nn.Module):
         H, W = x.shape[-2:]
 
         x = self.x_embedder(x) + self.pos_embed  # (N, T, D), where T = H * W / patch_size ** 2
-
-        t = self.t_embedder(t)                   # (N, D)
-        r = self.r_embedder(r)
-        # t = torch.cat([t, r], dim=-1)
-        t = t + r
+        if not self.new:
+            t = self.t_embedder(t) + self.r_embedder(r)
+        else:
+            h = t - r
+            t = self.h_embedder(h) + self.r_embedder(r)
 
         # condition
         c = t

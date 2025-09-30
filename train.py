@@ -10,6 +10,7 @@ import time
 import os
 from PIL import Image
 from pathlib import Path
+from functools import partial
 
 import wandb
 
@@ -18,6 +19,14 @@ class Avger(list):
         return sum(self) / len(self)
     def __str__(self):
         return f'{self.avg():.6f}' if len(self) > 0 else 'None'
+def _log_config(d, key=None, is_main=False):
+    if not is_main:
+        return d
+    if key is None:
+        wandb.config.update(d)
+    else:
+        wandb.config[key] = d
+    return d
 
 if __name__ == '__main__':
     WORK_DIR = Path(__file__).resolve().parent / 'exps' / f'exp_{time.strftime("%Y%m%d-%H%M%S")}'
@@ -29,7 +38,13 @@ if __name__ == '__main__':
     os.makedirs(WORK_DIR / 'images', exist_ok=True)
     os.makedirs(WORK_DIR / 'checkpoints', exist_ok=True)
     accelerator = Accelerator(mixed_precision='fp16')
-    
+    if accelerator.is_main_process:
+        wandb.init(project="zhh_mf_revive", entity='evazhu-massachusetts-institute-of-technology')
+        wandb.config.update({
+            'work_dir': str(WORK_DIR),
+        })
+    log_config = partial(_log_config, is_main=accelerator.is_main_process)
+
     print(f'rank {accelerator.process_index} is running', flush=True)
 
     # dataset = torchvision.datasets.CIFAR10(
@@ -77,11 +92,13 @@ if __name__ == '__main__':
         num_heads=8,
         # num_heads=6,
         num_classes=10,
+    **log_config(dict(new=False), key='dit')
+    # **log_config(dict(new=True), key='dit')
     ).to(accelerator.device)
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=0.0)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=0.0, betas=(0.9,0.95))
 
-    meanflow = MeanFlow(channels=1,
+    meanflow = MeanFlow(**log_config(dict(channels=1,
                         image_size=32,
                         num_classes=10,
                         flow_ratio=0.50,
@@ -91,7 +108,9 @@ if __name__ == '__main__':
                         # cfg_scale=2.0,
                         # experimental
                         # cfg_uncond='u'
-                        )
+                        
+                        # loss_fn='new',
+                        )))
     if accelerator.is_main_process:
         print('num params: {:,}'.format(sum(p.numel() for p in model.parameters() if p.requires_grad)), flush=True)
     model, optimizer, train_dataloader = accelerator.prepare(model, optimizer, train_dataloader)
@@ -99,18 +118,12 @@ if __name__ == '__main__':
     global_step = 0
     # global_step = -1 # debug
     losses = Avger()
-    mse_losses = Avger()
+    mse_losses, fm_losses, mf_losses = Avger(), Avger(), Avger()
 
     log_step = 500
     sample_step = 500
-    
-    if accelerator.is_main_process:
-        wandb.init(project="zhh_mf_revive", entity='evazhu-massachusetts-institute-of-technology')
-        wandb.config.update({
-            'work_dir': str(WORK_DIR),
-        })
 
-    with tqdm(range(n_steps), dynamic_ncols=True) as pbar:
+    with tqdm(range(n_steps), disable=not accelerator.is_main_process) as pbar:
         # pbar.set_description("Training")
         model.train()
         for step in pbar:
@@ -120,7 +133,9 @@ if __name__ == '__main__':
             
             ### WE TRAIN UNCOND MODEL ###
 
-            loss, mse_val = meanflow.loss(model, x, c=c)
+            loss, mse_val, fm_val, mf_val = meanflow.loss(model, x, c=c)
+            if torch.isnan(loss) or torch.isinf(loss):
+                raise RuntimeError("WARNING: nan or inf loss, abort training.")
 
             accelerator.backward(loss)
             optimizer.step()
@@ -128,26 +143,27 @@ if __name__ == '__main__':
 
             global_step += 1
             losses.append(loss.item())
-            mse_losses.append(mse_val.item())
+            mse_losses.append(mse_val.item()), fm_losses.append(fm_val.item()), mf_losses.append(mf_val.item())
 
             if accelerator.is_main_process:
-                if global_step % log_step == 0:
-                    current_time = time.asctime(time.localtime(time.time()))
-                    loss_info = f'Loss: {losses}    MSE_Loss: {mse_losses}'
+                loss_info = f'Loss: {losses}    MSE_Loss: {mse_losses}    FM_Loss: {fm_losses}    MF_Loss: {mf_losses}'
 
-                    # Extract the learning rate from the optimizer
-                    lr = optimizer.param_groups[0]['lr']
-                    lr_info = f'Learning Rate: {lr:.6f}'
+                # Extract the learning rate from the optimizer
+                lr = optimizer.param_groups[0]['lr']
+                lr_info = f'Learning Rate: {lr:.6f}'
 
-                    # log_message = f'{current_time}\n{batch_info}    {loss_info}    {lr_info}\n'
-                    # print(log_message, flush=True)
-                    pbar.set_description(f'{loss_info} | {lr_info}')
+                # log_message = f'{current_time}\n{batch_info}    {loss_info}    {lr_info}\n'
+                # print(log_message, flush=True)
+                pbar.set_description(f'{loss_info} | {lr_info}')
 
                     # with open('log.txt', mode='a') as n:
                         # n.write(log_message)
+                if global_step % log_step == 0:
                     wandb.log({
                         "loss": losses.avg(),
                         "mse_loss": mse_losses.avg(),
+                        "fm_loss": fm_losses.avg(),
+                        "mf_loss": mf_losses.avg(),
                         "learning_rate": lr,
                         # "step": global_step
                     }, step=global_step)
