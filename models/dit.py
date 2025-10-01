@@ -36,7 +36,8 @@ class TimestepEmbedder(nn.Module):
         return embedding
 
     def forward(self, t):
-        t = t*1000
+        # t = t*1000
+        t = t
         t_freq = self.timestep_embedding(t, self.nfreq)
         t_emb = self.mlp(t_freq)
         return t_emb
@@ -130,9 +131,9 @@ class MFDiT(nn.Module):
         self.new = new
         if not new:
             self.t_embedder = TimestepEmbedder(dim)
+            self.r_embedder = TimestepEmbedder(dim)
         else:
             self.h_embedder = TimestepEmbedder(dim)
-        self.r_embedder = TimestepEmbedder(dim)
 
         self.use_cond = num_classes is not None
         self.y_embedder = LabelEmbedder(num_classes, dim) if self.use_cond else None
@@ -178,8 +179,8 @@ class MFDiT(nn.Module):
             nn.init.normal_(self.h_embedder.mlp[0].weight, std=0.02)
             nn.init.normal_(self.h_embedder.mlp[2].weight, std=0.0)
             
-            nn.init.normal_(self.r_embedder.mlp[0].weight, std=0.02)
-            nn.init.normal_(self.r_embedder.mlp[2].weight, std=0.02)
+            # nn.init.normal_(self.r_embedder.mlp[0].weight, std=0.02)
+            # nn.init.normal_(self.r_embedder.mlp[2].weight, std=0.02)
 
         # Zero-out adaLN modulation layers in DiT blocks:
         for block in self.blocks:
@@ -221,7 +222,8 @@ class MFDiT(nn.Module):
             t = self.t_embedder(t) + self.r_embedder(r)
         else:
             h = t - r
-            t = self.h_embedder(h) + self.r_embedder(r)
+            # t = self.h_embedder(h) + self.r_embedder(r)
+            t = self.h_embedder(h)
 
         # condition
         c = t
