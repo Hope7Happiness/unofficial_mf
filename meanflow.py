@@ -245,9 +245,11 @@ class MeanFlow:
         u_tgt = u_superv - (t_ - r_) * dudt
         l_mf = torch.mean((u - SG(u_tgt)) ** 2, dim=(1,2,3))
         
-        # loss = adaptive_l2_loss(error)
+        loss_orig = l_fm * self.flow_ratio + l_mf * (1 - self.flow_ratio)
         
-        mse_val = SG(loss).mean()
+        loss = adaptive_loss(loss_orig)
+        
+        mse_val = SG(loss_orig).mean()
         fm_val = SG(l_fm).mean()
         mf_val = SG(l_mf).mean()
         return loss, mse_val, fm_val, mf_val

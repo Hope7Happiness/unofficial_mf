@@ -92,8 +92,8 @@ if __name__ == '__main__':
         num_heads=8,
         # num_heads=6,
         num_classes=10,
-    **log_config(dict(new=False), key='dit')
-    # **log_config(dict(new=True), key='dit')
+    # **log_config(dict(new=False), key='dit')
+    **log_config(dict(new=True), key='dit')
     ).to(accelerator.device)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=0.0, betas=(0.9,0.95))
@@ -109,7 +109,7 @@ if __name__ == '__main__':
                         # experimental
                         # cfg_uncond='u'
                         
-                        # loss_fn='new',
+                        loss_fn='new',
                         )))
     if accelerator.is_main_process:
         print('num params: {:,}'.format(sum(p.numel() for p in model.parameters() if p.requires_grad)), flush=True)
