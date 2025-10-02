@@ -109,7 +109,13 @@ if __name__ == '__main__':
                         # experimental
                         # cfg_uncond='u'
                         
-                        loss_fn='new',
+                        loss_fn='unsup',
+                        weight_fm=0.5,
+                        weight_mf=0.5,
+                        weight_reg=0.0,
+                        
+                        # loss_fn='new',
+                        # bidirectional=True,
                         )))
     if accelerator.is_main_process:
         print('num params: {:,}'.format(sum(p.numel() for p in model.parameters() if p.requires_grad)), flush=True)
@@ -118,7 +124,7 @@ if __name__ == '__main__':
     global_step = 0
     # global_step = -1 # debug
     losses = Avger()
-    mse_losses, fm_losses, mf_losses = Avger(), Avger(), Avger()
+    mse_losses, fm_losses, mf_losses, reg_losses = Avger(), Avger(), Avger(), Avger()
 
     log_step = 500
     sample_step = 500
@@ -133,7 +139,7 @@ if __name__ == '__main__':
             
             ### WE TRAIN UNCOND MODEL ###
 
-            loss, mse_val, fm_val, mf_val = meanflow.loss(model, x, c=c)
+            loss, mse_val, fm_val, mf_val, reg_val = meanflow.loss(model, x, c=c)
             if torch.isnan(loss) or torch.isinf(loss):
                 raise RuntimeError("WARNING: nan or inf loss, abort training.")
 
@@ -143,10 +149,10 @@ if __name__ == '__main__':
 
             global_step += 1
             losses.append(loss.item())
-            mse_losses.append(mse_val.item()), fm_losses.append(fm_val.item()), mf_losses.append(mf_val.item())
+            mse_losses.append(mse_val.item()), fm_losses.append(fm_val.item()), mf_losses.append(mf_val.item()), reg_losses.append(reg_val.item())
 
             if accelerator.is_main_process:
-                loss_info = f'Loss: {losses}    MSE_Loss: {mse_losses}    FM_Loss: {fm_losses}    MF_Loss: {mf_losses}'
+                loss_info = f'Loss: {losses}    MSE_Loss: {mse_losses}    FM_Loss: {fm_losses}    MF_Loss: {mf_losses}    Reg_Loss: {reg_losses}'
 
                 # Extract the learning rate from the optimizer
                 lr = optimizer.param_groups[0]['lr']
@@ -164,12 +170,16 @@ if __name__ == '__main__':
                         "mse_loss": mse_losses.avg(),
                         "fm_loss": fm_losses.avg(),
                         "mf_loss": mf_losses.avg(),
+                        "reg_loss": reg_losses.avg(),
                         "learning_rate": lr,
                         # "step": global_step
                     }, step=global_step)
 
                     losses = Avger()
                     mse_losses = Avger()
+                    fm_losses = Avger()
+                    mf_losses = Avger()
+                    reg_losses = Avger()
 
             if global_step % sample_step == 0:
                 if accelerator.is_main_process:

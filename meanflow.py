@@ -64,6 +64,12 @@ def adaptive_loss(loss, gamma=0.5, c=1e-3):
     loss = delta_sq  # ||Δ||^2
     return (stopgrad(w) * loss).mean()
 
+def disp_loss(z): # Dispersive Loss implementation (InfoNCE-L2 variant)
+    z = z.reshape((z.shape[0],-1)) # flatten
+    diff = torch.nn.functional.pdist(z).pow(2)/z.shape[1] # pairwise distance
+    diff = torch.concat((diff, diff, torch.zeros(z.shape[0]).cuda()))  # match JAX implementation of full BxB matrix
+    return torch.log(torch.exp(-diff).mean()) # calculate loss
+
 class MeanFlow:
     def __init__(
         self,
@@ -82,6 +88,10 @@ class MeanFlow:
         cfg_uncond='v',
         jvp_api='autograd',
         loss_fn='orig',
+        bidirectional=False,
+        weight_fm=None,
+        weight_mf=None,
+        weight_reg=None,
     ):
         super().__init__()
         self.channels = channels
@@ -107,9 +117,18 @@ class MeanFlow:
         elif jvp_api == 'autograd':
             self.jvp_fn = torch.autograd.functional.jvp
             self.create_graph = True
+            
+        if self.loss_fn != 'new':
+            assert not bidirectional, "bidirectional only for new loss"
+        self.bidirectional = bidirectional            
+        if self.loss_fn != 'unsup':
+            assert weight_fm == weight_mf == weight_reg == None, "Only support unsup loss now"
+        self.weight_fm = weight_fm
+        self.weight_mf = weight_mf
+        self.weight_reg = weight_reg
 
     # fix: r should be always not larger than t
-    def sample_t_r(self, batch_size, device, use_fm=True):
+    def sample_t_r(self, batch_size, device, use_fm=True, bidirectional=False):
         if self.time_dist[0] == 'uniform':
             samples = np.random.rand(batch_size, 2).astype(np.float32)
 
@@ -128,6 +147,11 @@ class MeanFlow:
         else:
             t_np = samples[:, 0]
             r_np = samples[:, 1]
+            
+        if bidirectional:
+            swap = np.random.rand(batch_size) < 0.5
+            t_np = np.where(swap, 1 - t_np, t_np)
+            r_np = np.where(swap, 1 - r_np, r_np)
 
         t = torch.tensor(t_np, device=device)
         r = torch.tensor(r_np, device=device)
@@ -136,6 +160,8 @@ class MeanFlow:
     def loss(self, model, x, c=None):
         if self.loss_fn == 'new':
             return self.new_loss_fn(model, x, c)
+        elif self.loss_fn == 'unsup':
+            return self.unsupervised_loss(model, x, c)
         elif self.loss_fn == 'orig':
             pass
         else:
@@ -206,14 +232,14 @@ class MeanFlow:
         fm_loss = cond_mean(mse, is_fm)
         mf_loss = cond_mean(mse, ~is_fm)
 
-        return loss, mse_val, fm_loss, mf_loss
+        return loss, mse_val, fm_loss, mf_loss, mf_loss*0.0
 
     def new_loss_fn(self, model, x, c=None):
         # Implement the new loss function here
         batch_size = x.shape[0]
         device = x.device
         
-        t, r = self.sample_t_r(batch_size, device, use_fm=False)
+        t, r = self.sample_t_r(batch_size, device, use_fm=False, bidirectional=self.bidirectional)
         t_ = rearrange(t, "b -> b 1 1 1").detach().clone()
         r_ = rearrange(r, "b -> b 1 1 1").detach().clone()
         
@@ -252,8 +278,61 @@ class MeanFlow:
         mse_val = SG(loss_orig).mean()
         fm_val = SG(l_fm).mean()
         mf_val = SG(l_mf).mean()
-        return loss, mse_val, fm_val, mf_val
+        return loss, mse_val, fm_val, mf_val, mf_val*0.0
+    
+    def unsupervised_loss(self, model, x, c=None):
+        # Implement the new loss function here
+        batch_size = x.shape[0]
+        device = x.device
         
+        t, r = self.sample_t_r(batch_size, device, use_fm=False, bidirectional=True)
+        t_ = rearrange(t, "b -> b 1 1 1").detach().clone()
+        r_ = rearrange(r, "b -> b 1 1 1").detach().clone()
+        
+        e = torch.randn_like(x)
+        x = self.normer.norm(x)
+        z = (1 - t_) * x + t_ * e
+        v = e - x
+        
+        assert c is not None and self.cfg_ratio is None, "Only support conditional model without cfg for new loss"
+        
+        model_partial = partial(model, y=c)
+        
+        # FM loss
+        u_tt = model_partial(z, t, t)
+        l_fm = torch.mean((u_tt - v) ** 2, dim=(1,2,3))
+        u_superv = SG(u_tt)
+        del v # avoid cheating in the future
+        
+        # MF loss
+        jvp_args = (
+            lambda z, t, r: model_partial(z, t, r),
+            (z, t, r),
+            (u_superv, torch.ones_like(t), torch.zeros_like(r)),
+        )
+        if self.create_graph:
+            u, dudt = self.jvp_fn(*jvp_args, create_graph=True)
+        else:
+            u, dudt = self.jvp_fn(*jvp_args)
+
+        u_tgt = u_superv - (t_ - r_) * dudt
+        l_mf = torch.mean((u - SG(u_tgt)) ** 2, dim=(1,2,3))
+        
+        # regularization loss
+        # TODO{zhh}: use z or use x?
+        eps_pred = model_partial(z, t, t*0.0+1.0)
+        l_reg = disp_loss(eps_pred)
+
+        loss_orig = l_fm * self.weight_fm + l_mf * self.weight_mf + l_reg * self.weight_reg
+
+        loss = adaptive_loss(loss_orig)
+        
+        mse_val = SG(loss_orig).mean()
+        fm_val = SG(l_fm).mean()
+        mf_val = SG(l_mf).mean()
+        reg_val = SG(l_reg).mean()
+        return loss, mse_val, fm_val, mf_val, reg_val
+
     @torch.no_grad()
     def sample_each_class(self, model, n_per_class, classes=None,
                           sample_steps=5, device='cuda'):
